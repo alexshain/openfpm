@@ -117,7 +117,7 @@
 #define FLUID 1
 
 // initial spacing between particles dp in the formulas
-const double dp = 0.0002;
+const double dp = 0.0001;
 // Maximum height of the fluid water
 // is going to be calculated and filled later on
 double h_swl = 0.0;
@@ -136,6 +136,7 @@ const double Eta2 = 0.01 * H*H;
 
 // alpha in the formula
 const double visco = 0.015; // По формуле из статьи 
+//const double visco = 0.0075;
 
 // cbar in the formula (calculated later)
 double cbar = 0.0;
@@ -168,7 +169,7 @@ double B = 0.0;
 const double CFLnumber = 0.2;
 
 // Minimum T
-const double DtMin = 0.00001;
+const double DtMin = 0.000005;
 
 // Minimum Rho allowed
 const double RhoMin = 700.0;
@@ -205,12 +206,14 @@ const int velocity = 6;
 // velocity at previous step
 const int velocity_prev = 7;
 
+const int isBoundary = 8;
+
 /*! \cond [sim parameters] \endcond */
 
 /*! \cond [vector_dist_def] \endcond */
 
 // Type of the vector containing particles
-typedef vector_dist<2,double,aggregate<size_t,double,  double,    double,     double,     double[2], double[2], double[2]>> particles;
+typedef vector_dist<2,double,aggregate<size_t,double,  double,    double,     double,     double[2], double[2], double[2], int>> particles;
 //                                       |      |        |          |            |            |         |            |
 //                                       |      |        |          |            |            |         |            |
 //                                     type   density   density    Pressure    delta       force     velocity    velocity
@@ -456,7 +459,7 @@ inline double Pi(const Point<2,double> & dr, double rr2, Point<2,double> & dv, d
 
 /*! \cond [calc_forces] \endcond */
 
-#include "surface_tension.h"
+#include "surface_tension_analit.h"
 
 template<typename CellList> inline void calc_forces(particles & vd, CellList & NN, double & max_visc)
 {
@@ -552,53 +555,36 @@ template<typename CellList> inline void calc_forces(particles & vd, CellList & N
 
 			/**********************/
 			/* tension calculation*/
+			static int counter = 0;
+
 			double kappa_a = 0.0;
 		    Point<2,double> normal_a = {0.0, 0.0};
 		    
 		    if (is_boundary_particle(vd, a, NN, 2 * H)) {
-		    	Point<2,double> new_origin = get_new_origin(vd, a, NN);
-		        double alpha = get_alpha(a, new_origin, vd);
-		        double x_eval = get_local_coord(xa, new_origin, alpha).get(0);
+		        Point<2,double> new_origin = get_new_origin(vd, a, NN);
+	            double alpha = get_alpha(xa, new_origin, vd);
+	            double x_eval = get_local_coord(xa, new_origin, alpha).get(0);
 
-			    std::vector<Point<2,double>> neighbors_on_local_coord = get_neighbors_on_local_coord(xa, vd, NN, new_origin, alpha);
-			    
-			    if (neighbors_on_local_coord.size() >= 3) {
-			        // ВЫВОД ДЛЯ ДИАГНОСТИКИ
-			        static int debug_count = 0;
-			        if (debug_count < 10) {
-			            std::cout << "=== DEBUG Particle " << a.getKey() << " ===" << std::endl;
-			            std::cout << "Points for interpolation (" << neighbors_on_local_coord.size() << "):" << std::endl;
-			            for (size_t i = 0; i < neighbors_on_local_coord.size(); i++) {
-			                std::cout << "  Point " << i << ": (" << neighbors_on_local_coord[i].get(0) 
-			                          << ", " << neighbors_on_local_coord[i].get(1) << ")" << std::endl;
-			            }
-			            std::cout << "x_eval: " << x_eval << std::endl;
-			            std::cout << "alpha: " << alpha << std::endl;
-			        }
-			        
-			        double P_x = compute_lagrange(neighbors_on_local_coord, x_eval);
-			        double P_deriv = compute_first_deriv_of_lagrange(neighbors_on_local_coord, x_eval);
-			        double P_deriv2 = compute_second_deriv_of_lagrange(neighbors_on_local_coord, x_eval);
-			        
-			        if (debug_count < 10) {
-			            std::cout << "P(x) = " << P_x << ", P'(x) = " << P_deriv << ", P''(x) = " << P_deriv2 << std::endl;
-			            debug_count++;
-			        }
-			        
-			        std::tie(kappa_a, normal_a) = get_curvature_and_normal(P_deriv, P_deriv2, alpha);
-			        
-			        if (debug_count < 10) {
-			            std::cout << "kappa = " << kappa_a << ", normal = (" << normal_a.get(0) 
-			                      << ", " << normal_a.get(1) << ")" << std::endl;
-			            std::cout << "=================================" << std::endl;
-			        }
-			        
-			        const double sigma = 0.072;
-			        double force_st_magnitude = sigma * kappa_a;
-			        
-			        vd.getProp<force>(a)[0] += force_st_magnitude * normal_a.get(0);
-			        vd.getProp<force>(a)[1] += force_st_magnitude * normal_a.get(1);
-			    }
+	            std::vector<Point<2,double>> neighbors_on_local_coord = get_neighbors_on_local_coord(xa, vd, NN, new_origin, alpha);
+	            
+	            if (neighbors_on_local_coord.size() >= 5) {
+	                double P_x, P_deriv, P_deriv2;
+	                if (weighted_quadratic_fit(neighbors_on_local_coord, x_eval, P_x, P_deriv, P_deriv2)) {
+	                    std::tie(kappa_a, normal_a) = get_curvature_and_normal(P_deriv, P_deriv2, alpha);
+
+	                    if(counter < 40) {
+	                    	std::cout << "kappa: " << kappa_a << std::endl;
+	                    	counter++;
+	                    }
+	                    
+	                    const double sigma = 0.072;
+	                    //const double sigma = 0.144;
+	                    double force_st_magnitude = 10 * sigma * kappa_a;
+	                    
+	                    vd.getProp<force>(a)[0] += force_st_magnitude * normal_a.get(0);
+	                    vd.getProp<force>(a)[1] += force_st_magnitude * normal_a.get(1);
+	                }
+		    	}
 			}
 		    /**********************/
 
@@ -1203,35 +1189,37 @@ int main(int argc, char* argv[])
 		++fluid_it;
 	}*/
 
-	const double sphere_radius = 0.002;  // радиус капли
-	Point<2, double> sphere_center({0.01, 0.01}); // центр капли
+	const double a_axis = 0.003;      // большая полуось по X (горизонтальная)
+	const double b_axis = 0.0015;     // малая полуось по Y (вертикальная)
+	Point<2, double> ellipse_center({0.005, 0.005}); // центр эллипса
 
-	// Создаем кубическую область, содержащую сферу
-	Box<2,double> bounding_box({sphere_center[0]-sphere_radius, sphere_center[1]-sphere_radius},
-	                           {sphere_center[0]+sphere_radius, sphere_center[1]+sphere_radius});
+	// Создаем ограничивающий прямоугольник для эллипса
+	Box<2,double> bounding_box({ellipse_center[0]-a_axis, ellipse_center[1]-b_axis},
+	                           {ellipse_center[0]+a_axis, ellipse_center[1]+b_axis});
 
+	// Получаем итератор по точкам сетки внутри прямоугольника
 	auto fluid_it = DrawParticles::DrawBox(vd, sz, domain, bounding_box);
 
-	// здесь мы заполняем некоторые константы, необходимые для симуляции
-	max_fluid_height = bounding_box.getHigh(1);
-	h_swl = bounding_box.getHigh(1) - bounding_box.getLow(1);
+	// Здесь мы заполняем некоторые константы, необходимые для симуляции
+	max_fluid_height = bounding_box.getHigh(1);  // максимальная высота жидкости
+	h_swl = bounding_box.getHigh(1) - bounding_box.getLow(1);  // высота водной поверхности
 	B = (coeff_sound)*(coeff_sound)*gravity*h_swl*rho_zero / gamma_;
 	cbar = coeff_sound * sqrt(gravity * h_swl);
 
-	// Фильтруем частицы, оставляя только те, что внутри сферы
+	// Фильтруем частицы, оставляя только те, что внутри эллипса
 	while (fluid_it.isNext())
 	{
-	    // Получаем позицию точки из итератора
-	    Point<2, double> pos = fluid_it.get();
+	    Point<2, double> pos = fluid_it.get(); // Координаты точки сетки
 	    
-	    // Проверяем, находится ли частица внутри сферы
-	    double dist = 0.0;
-	    for (int i = 0; i < 2; i++) {
-	        dist += (pos[i] - sphere_center[i]) * (pos[i] - sphere_center[i]);
-	    }
-	    dist = sqrt(dist);
+	    // Смещение от центра эллипса
+	    double dx = pos[0] - ellipse_center[0];
+	    double dy = pos[1] - ellipse_center[1];
 	    
-	    //if (dist <= sphere_radius) {
+	    // Вычисляем значение уравнения эллипса: (x/a)^2 + (y/b)^2 ≤ 1
+	    double ellipse_value = (dx*dx)/(a_axis*a_axis) + (dy*dy)/(b_axis*b_axis);
+	    
+	    // Если точка внутри или на границе эллипса
+	    if (ellipse_value <= 1.0) {
 	        // Добавляем частицу
 	        vd.add();
 	        
@@ -1242,8 +1230,15 @@ int main(int argc, char* argv[])
 	        // Устанавливаем свойства
 	        vd.template getLastProp<type>() = FLUID;
 	        
-	        // Гидростатическое давление для сферической капли
-	        double height_from_bottom = sphere_center[1] + sphere_radius - pos[1];
+	        // Гидростатическое давление для эллиптической капли
+	        // Используем вертикальное расстояние от нижней точки эллипса
+	        double bottom_of_ellipse = ellipse_center[1] - b_axis;  // самая нижняя точка эллипса
+	        double height_from_bottom = pos[1] - bottom_of_ellipse;  // высота от дна
+	        
+	        // Альтернатива: расстояние от центра по вертикали
+	        // double height_from_center = pos[1] - ellipse_center[1];
+	        // double height_from_bottom = b_axis + height_from_center;
+	        
 	        vd.template getLastProp<Pressure>() = rho_zero * gravity * height_from_bottom;
 	        
 	        vd.template getLastProp<rho>() = pow(vd.template getLastProp<Pressure>() / B + 1, 1.0/gamma_) * rho_zero;
@@ -1253,7 +1248,7 @@ int main(int argc, char* argv[])
 	        
 	        vd.template getLastProp<velocity_prev>()[0] = 0.0;
 	        vd.template getLastProp<velocity_prev>()[1] = 0.0;
-	    //}
+	    }
 	    
 	    ++fluid_it;
 	}
@@ -1286,8 +1281,8 @@ int main(int argc, char* argv[])
 	//! \cond [draw recipient] \endcond
 
 	// Recipient
-	Box<2,double> recipient1({0.0,0.0},{0.02+dp/2.0,0.02+dp/2.0});
-	Box<2,double> recipient2({dp,dp},{0.02-dp/2.0,0.02-dp/2.0});
+	Box<2,double> recipient1({0.0,0.0},{0.01+dp,0.01+dp});
+	Box<2,double> recipient2({dp,dp},{0.01-dp/2.0,0.01-dp/2.0});
 
 	/*Box<3,double> obstacle1({0.9,0.24-dp/2.0,0.0},{1.02+dp/2.0,0.36,0.45+dp/2.0});
 	Box<3,double> obstacle2({0.9+dp,0.24+dp/2.0,0.0},{1.02-dp/2.0,0.36-dp,0.45-dp/2.0});

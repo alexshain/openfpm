@@ -80,7 +80,60 @@ inline bool is_boundary_particle(particles & vd, vect_dist_key_dx a, CellList & 
         coverage += (arc.second - arc.first);
     }
     
-    return coverage < 2*M_PI - 1e-10;
+
+    bool is_boundary = coverage < 2*M_PI - 1e-10;
+    vd.template getProp<isBoundary>(a) = is_boundary ? 1 : 0;
+    return is_boundary;
+}
+
+inline bool weighted_quadratic_fit(const std::vector<Point<2,double>>& pts,
+                                  double x_eval,
+                                  double &P, double &P1, double &P2) {
+    size_t n = pts.size();
+    if (n < 3) return false;
+
+    double A00 = 0, A01 = 0, A02 = 0, A11 = 0, A12 = 0, A22 = 0;
+    double b0 = 0, b1 = 0, b2 = 0;
+
+    for (size_t i = 0; i < n; ++i) {
+        double x = pts[i].get(0);
+        double y = pts[i].get(1);
+        double dx = x - x_eval;
+        double r = fabs(dx);
+        
+        double w = Wab(r);
+        if (w < 1e-12) continue;
+
+        double X0 = 1.0, X1 = x, X2 = x*x;
+        
+        A00 += w * X0 * X0;
+        A01 += w * X0 * X1;
+        A02 += w * X0 * X2;
+        A11 += w * X1 * X1;
+        A12 += w * X1 * X2;
+        A22 += w * X2 * X2;
+
+        b0 += w * X0 * y;
+        b1 += w * X1 * y;
+        b2 += w * X2 * y;
+    }
+
+    double det = A00*(A11*A22 - A12*A12) - A01*(A01*A22 - A12*A02) + A02*(A01*A12 - A11*A02);
+    if (fabs(det) < 1e-14) return false;
+
+    double det0 = b0*(A11*A22 - A12*A12) - A01*(b1*A22 - A12*b2) + A02*(b1*A12 - A11*b2);
+    double det1 = A00*(b1*A22 - A12*b2) - b0*(A01*A22 - A12*A02) + A02*(A01*b2 - b1*A02);
+    double det2 = A00*(A11*b2 - A12*b1) - A01*(A01*b2 - A12*b0) + A02*(A01*b1 - A11*b0);
+
+    double a0 = det0 / det;
+    double a1 = det1 / det;
+    double a2 = det2 / det;
+
+    P = a0 + a1 * x_eval + a2 * x_eval * x_eval;
+    P1 = a1 + 2.0 * a2 * x_eval;
+    P2 = 2.0 * a2;
+    
+    return true;
 }
 
 template<typename CellList>
@@ -120,19 +173,16 @@ inline Point<2,double> get_new_origin(particles & vd, vect_dist_key_dx a, CellLi
     return Point<2,double>({x_new, y_new});
 }
 
-inline double get_alpha(auto a, const Point<2,double> &new_origin, particles & vd) {
-    Point<2,double> xa = vd.getPos(a);
-
+inline double get_alpha(const Point<2,double>& xa, const Point<2,double> &new_origin, particles & vd) {
     double rx = xa.get(0) - new_origin.get(0);
     double ry = xa.get(1) - new_origin.get(1);
-
-    double r = sqrt(rx*rx + ry*ry);
-
-    if(rx > 0) {
-        return 2 * M_PI - acos(ry / r);
-    } else {
-        return acos(ry / r);
-    }
+    
+    double theta = atan2(ry, rx);
+    
+    double alpha = theta - M_PI_2;
+    
+    if (alpha < 0) alpha += 2*M_PI;
+    return alpha;
 }
 
 inline Point<2,double> get_local_coord(Point<2,double> xb, const Point<2,double> &new_origin, double alpha) {
@@ -142,128 +192,17 @@ inline Point<2,double> get_local_coord(Point<2,double> xb, const Point<2,double>
     return Point<2,double>({x_local, y_local});
 }
 
-inline double compute_lagrange(const std::vector<Point<2,double>>& points, double x_eval) {
-    double result = 0;
-    
-    for (size_t j = 0; j < points.size(); j++) {
-        double term = points[j].get(1); // y_j
-        double xj = points[j].get(0);
-
-        
-        for (size_t k = 0; k < points.size(); k++) {
-            if (j == k) continue;
-            
-            double xk = points[k].get(0);
-            double denominator = xj - xk;
-            
-            if (fabs(denominator) < 1e-10) {
-                continue;
-            }
-
-            term *= (x_eval - xk) / denominator;
-        }
-        result += term;
-    }
-    return result;
-}
-
-inline double compute_first_deriv_of_lagrange(const std::vector<Point<2,double>>& points, double x_eval) {
-    if(points.size() <= 1) {
-        return 0;
-    }
-
-    double result = 0;
-    for (size_t j = 0; j < points.size(); j++) {
-        double yj = points[j].get(1);
-        double xj = points[j].get(0);
-        
-        double Lj = 1.0;
-        for (size_t k = 0; k < points.size(); k++) {
-            if (j == k) continue;
-            double xk = points[k].get(0);
-            double denominator = xj - xk;
-            if (fabs(denominator) < 1e-10) continue;
-            Lj *= (x_eval - xk) / denominator;
-        }
-        
-        double sum_reciprocal = 0.0;
-        for (size_t m = 0; m < points.size(); m++) {
-            if (m == j) continue;
-            double xm = points[m].get(0);
-            if (fabs(x_eval - xm) < 1e-10) continue; 
-            sum_reciprocal += 1.0 / (x_eval - xm);
-        }
-        
-        result += yj * Lj * sum_reciprocal;
-    }
-    return result;
-}
-
-inline double compute_second_deriv_of_lagrange(const std::vector<Point<2,double>>& points, double x_eval) {
-    /*if(points.size() <= 2) {
-        return 0;
-    }
-
-    double result = 0;
-    for (size_t j = 0; j < points.size(); j++) {
-        double yj = points[j].get(1);
-        double xj = points[j].get(0);
-        
-        double Lj = 1.0;
-        for (size_t k = 0; k < points.size(); k++) {
-            if (j == k) continue;
-            double xk = points[k].get(0);
-            double denominator = xj - xk;
-            if (fabs(denominator) < 1e-4) continue;
-            Lj *= (x_eval - xk) / denominator;
-        }
-        
-        double outer_sum = 0.0;
-        
-        for (size_t k = 0; k < points.size(); k++) {
-            if (k == j) continue;
-            
-            double inner_product = 1.0;
-            
-            for (size_t m = 0; m < points.size(); m++) {
-                if (m == j || m == k) continue;
-                
-                double xm = points[m].get(0);
-                double diff = x_eval - xm;
-                if (fabs(diff) < 1e-4) continue;
-                
-                inner_product *= 1.0 / diff;
-            }
-            
-            outer_sum += inner_product;
-        }
-        
-        result += yj * Lj * 2.0 * outer_sum;
-    }
-    return result;*/
-
-    double h = 1e-8; 
-    
-    double f_plus = compute_lagrange(points, x_eval + h);
-    double f_center = compute_lagrange(points, x_eval);
-    double f_minus = compute_lagrange(points, x_eval - h);
-    
-    double second_deriv = (f_plus - 2*f_center + f_minus) / (h * h);
-    
-    // Сильная регуляризация
-    return second_deriv;
-}
-
 //refactor me
 template<typename CellList>
 inline std::vector<Point<2,double>> get_neighbors_on_local_coord(Point<2,double> xa, particles & vd, CellList & NN, Point<2,double> new_origin, double alpha) {
     std::vector<Point<2,double>> local_points;
     
     auto Np_all = NN.getNNIteratorBox(NN.getCell(xa));
+
     while (Np_all.isNext()) {
         auto neighbor = Np_all.get();
 
-        if (!is_boundary_particle(vd, neighbor, NN, 2 * H)) {
+        if (vd.template getProp<isBoundary>(neighbor) == 0) {
             ++Np_all;
             continue;
         }
@@ -279,13 +218,13 @@ inline std::vector<Point<2,double>> get_neighbors_on_local_coord(Point<2,double>
 //refactor me
 inline std::tuple<double, Point<2,double>> get_curvature_and_normal(double P_deriv, double P_deriv2, double alpha) {
     double kappa = fabs(P_deriv2) / pow(1.0 + P_deriv*P_deriv, 1.5);
-    /*if (kappa > 2 / dp) {
+    if (kappa > 2 / dp) {
         kappa = 2 / dp;
-    }*/
-
-    if (kappa > 1000) {
-        kappa = 1000;
     }
+
+    /*if (kappa > 1000) {
+        kappa = 1000;
+    }*/
     
     Point<2,double> n_global;
     if (P_deriv2 < 0) {
